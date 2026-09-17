@@ -14,6 +14,11 @@ import (
 	"github.com/taosdata/driver-go/v3/wrapper"
 )
 
+var (
+	tmqGetRaw  = wrapper.TMQGetRaw
+	tmqFreeRaw = wrapper.TMQFreeRaw
+)
+
 type Consumer struct {
 	cConsumer  unsafe.Pointer
 	dataParser *parser.TMQRawDataParser
@@ -188,12 +193,13 @@ func (c *Consumer) getMeta(message unsafe.Pointer) (*tmq.Meta, error) {
 }
 
 func (c *Consumer) getData(message unsafe.Pointer) ([]*tmq.Data, error) {
-	errCode, raw := wrapper.TMQGetRaw(message)
+	errCode, raw := tmqGetRaw(message)
 	if errCode != taosError.SUCCESS {
 		errStr := wrapper.TaosErrorStr(message)
 		err := taosError.NewError(int(errCode), errStr)
 		return nil, err
 	}
+	defer tmqFreeRaw(raw)
 	_, _, rawPtr := wrapper.ParseRawMeta(raw)
 	blockInfos, err := c.dataParser.Parse(rawPtr)
 	if err != nil {

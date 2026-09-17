@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/taosdata/driver-go/v3/common/parser"
 	"github.com/taosdata/driver-go/v3/common/tmq"
 	"github.com/taosdata/driver-go/v3/errors"
 	"github.com/taosdata/driver-go/v3/wrapper"
@@ -547,6 +548,62 @@ func Test_tmqError(t *testing.T) {
 	err := tmqError(-1)
 	expectError := &errors.TaosError{Code: 65535, ErrStr: "fail"}
 	assert.Equal(t, expectError, err)
+}
+
+func TestGetDataFreesRaw(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawData []byte
+		wantErr bool
+	}{
+		{
+			name: "empty payload",
+			rawData: []byte{
+				100,
+				0, 0, 0, 0,
+				0, 0, 0, 0,
+				0,
+				0,
+			},
+		},
+		{
+			name:    "parser error",
+			rawData: []byte{0},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldGetRaw := tmqGetRaw
+			oldFreeRaw := tmqFreeRaw
+			t.Cleanup(func() {
+				tmqGetRaw = oldGetRaw
+				tmqFreeRaw = oldFreeRaw
+			})
+
+			raw := wrapper.BuildRawMeta(uint32(len(tt.rawData)), 0, unsafe.Pointer(&tt.rawData[0]))
+			freed := 0
+
+			tmqGetRaw = func(_ unsafe.Pointer) (int32, unsafe.Pointer) {
+				return errors.SUCCESS, raw
+			}
+			tmqFreeRaw = func(got unsafe.Pointer) {
+				require.Equal(t, raw, got)
+				freed++
+			}
+
+			consumer := &Consumer{dataParser: parser.NewTMQRawDataParser()}
+			data, err := consumer.getData(nil)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Empty(t, data)
+			}
+			assert.Equal(t, 1, freed)
+		})
+	}
 }
 
 func prepareTimezoneEnv(conn unsafe.Pointer) error {
