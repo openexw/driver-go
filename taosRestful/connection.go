@@ -1,11 +1,13 @@
 package taosRestful
 
 import (
+	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"database/sql/driver"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -211,9 +213,38 @@ func (tc *taosConn) taosQuery(ctx context.Context, sql string, bufferSize int) (
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode != http.StatusOK {
-		body, err := ioutil.ReadAll(resp.Body)
+		var body []byte
+		if !tc.cfg.DisableCompression && EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+			// A proxy may wrongly set Content-Encoding: gzip on a body that
+			// is not compressed; check the magic number first so the raw
+			// server message is preserved instead of a gzip header error.
+			br := bufio.NewReader(resp.Body)
+			if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+				gzReader, gzErr := gzip.NewReader(br)
+				if gzErr != nil {
+					return nil, gzErr
+				}
+				body, err = ioutil.ReadAll(gzReader)
+				_ = gzReader.Close()
+			} else {
+				body, err = ioutil.ReadAll(br)
+			}
+		} else {
+			body, err = ioutil.ReadAll(resp.Body)
+		}
 		if err != nil {
 			return nil, err
+		}
+		// taosAdapter can be configured (httpCodeServerError) to answer C API
+		// errors with a non-200 status while still sending the TDengine error
+		// JSON in the body; parse it so callers get the same typed error as
+		// with a 200 response.
+		var errResp struct {
+			Code int    `json:"code"`
+			Desc string `json:"desc"`
+		}
+		if jsonErr := json.Unmarshal(body, &errResp); jsonErr == nil && errResp.Code != 0 {
+			return nil, taosErrors.NewError(errResp.Code, errResp.Desc)
 		}
 		return nil, fmt.Errorf("server response: %s - %s", resp.Status, string(body))
 	}
