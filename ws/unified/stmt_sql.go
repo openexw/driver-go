@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/taosdata/driver-go/v3/common"
 	commonstmt "github.com/taosdata/driver-go/v3/common/stmt"
@@ -52,33 +53,109 @@ func buildStmtSQL(sql string, insert bool, fields []*commonstmt.Stmt2AllField, d
 		if item == nil || len(item.Cols) == 0 || len(item.Cols[0]) == 0 {
 			return nil, ErrStmtNoRowsToAdd
 		}
+
 		prefixArgs, err := stmtInsertArgs(item, fields[:prefixCount], 0, 0)
 		if err != nil {
 			return nil, err
 		}
-		renderedPrefix, err := common.InterpolateParams(prefix, common.ValueArgsToNamedValueArgs(prefixArgs))
-		if err != nil {
+
+		var statement strings.Builder
+		statement.Grow(len(prefix) + len(tuple)*len(item.Cols[0]) + len(suffix))
+		if err := appendStmtSQLArgs(&statement, prefix, prefixArgs); err != nil {
 			return nil, err
 		}
-
-		rows := make([]string, len(item.Cols[0]))
-		for row := range rows {
+		for row := range item.Cols[0] {
+			if row > 0 {
+				statement.WriteByte(' ')
+			}
 			args, err := stmtInsertArgs(item, fields[prefixCount:], row, prefixCols)
 			if err != nil {
 				return nil, err
 			}
-			rows[row], err = common.InterpolateParams(tuple, common.ValueArgsToNamedValueArgs(args))
-			if err != nil {
+			if err := appendStmtSQLArgs(&statement, tuple, args); err != nil {
 				return nil, err
 			}
 		}
-		statement := renderedPrefix + strings.Join(rows, " ") + suffix
-		if len(statement) > common.MaxTaosSqlLen {
+		statement.WriteString(suffix)
+		statementSQL := statement.String()
+		if len(statementSQL) > common.MaxTaosSqlLen {
 			return nil, fmt.Errorf("sql statement exceeds the maximum length")
 		}
-		out = append(out, statement)
+		out = append(out, statementSQL)
 	}
 	return out, nil
+}
+
+// appendStmtSQLArgs writes an interpolated fragment into the final SQL buffer.
+// stmtInsertArgs still performs all value conversion and validation.
+func appendStmtSQLArgs(dst *strings.Builder, template string, args []driver.Value) error {
+	if strings.Count(template, "?") != len(args) {
+		return driver.ErrSkip
+	}
+	for start, argIndex := 0, 0; ; {
+		marker := strings.IndexByte(template[start:], '?')
+		if marker < 0 {
+			dst.WriteString(template[start:])
+			return nil
+		}
+		marker += start
+		dst.WriteString(template[start:marker])
+		if err := appendStmtSQLArg(dst, args[argIndex]); err != nil {
+			return err
+		}
+		start = marker + 1
+		argIndex++
+	}
+}
+
+// appendStmtSQLArg preserves common.InterpolateParams' supported value forms,
+// but writes directly to the final result rather than allocating a row string.
+func appendStmtSQLArg(dst *strings.Builder, arg driver.Value) error {
+	switch v := arg.(type) {
+	case nil:
+		dst.WriteString("NULL")
+	case int8:
+		dst.WriteString(strconv.FormatInt(int64(v), 10))
+	case int16:
+		dst.WriteString(strconv.FormatInt(int64(v), 10))
+	case int32:
+		dst.WriteString(strconv.FormatInt(int64(v), 10))
+	case int64:
+		dst.WriteString(strconv.FormatInt(v, 10))
+	case uint8:
+		dst.WriteString(strconv.FormatUint(uint64(v), 10))
+	case uint16:
+		dst.WriteString(strconv.FormatUint(uint64(v), 10))
+	case uint32:
+		dst.WriteString(strconv.FormatUint(uint64(v), 10))
+	case uint64:
+		dst.WriteString(strconv.FormatUint(v, 10))
+	case float32:
+		dst.WriteString(strconv.FormatFloat(float64(v), 'f', 6, 32))
+	case float64:
+		dst.WriteString(strconv.FormatFloat(v, 'f', 6, 64))
+	case int:
+		dst.WriteString(strconv.Itoa(v))
+	case uint:
+		dst.WriteString(strconv.FormatUint(uint64(v), 10))
+	case bool:
+		if v {
+			dst.WriteByte('1')
+		} else {
+			dst.WriteByte('0')
+		}
+	case time.Time:
+		dst.WriteByte('\'')
+		dst.WriteString(v.Format(time.RFC3339Nano))
+		dst.WriteByte('\'')
+	case []byte:
+		dst.Write(v)
+	case string:
+		dst.WriteString(v)
+	default:
+		return driver.ErrSkip
+	}
+	return nil
 }
 
 func stmtQueryArgs(cols [][]driver.Value, fields []*commonstmt.Stmt2AllField) ([]driver.Value, error) {
